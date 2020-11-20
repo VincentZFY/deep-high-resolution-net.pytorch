@@ -36,6 +36,7 @@ from utils.utils import get_model_summary
 import dataset
 import models
 
+os.environ["CUDA_VISIBLE_DEVICES"]='5,6'
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train keypoints network')
@@ -112,7 +113,7 @@ def main():
 
     logger.info(get_model_summary(model, dump_input))
 
-    model = torch.nn.DataParallel(model, device_ids=cfg.GPUS).cuda()
+    model = torch.nn.DataParallel(model).cuda()
 
     # define loss function (criterion) and optimizer
     criterion = JointsMSELoss(
