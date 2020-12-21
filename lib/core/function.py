@@ -19,49 +19,71 @@ from core.evaluate import accuracy
 from core.inference import get_final_preds
 from utils.transforms import flip_back
 from utils.vis import save_debug_images
-
+import pdb
 
 logger = logging.getLogger(__name__)
 
 
-def train(config, train_loader, model, criterion, optimizer, epoch,
+def train(config, train_loader, model, criterion, regress_loss, optimizer, epoch,
           output_dir, tb_log_dir, writer_dict):
     batch_time = AverageMeter()
     data_time = AverageMeter()
-    losses = AverageMeter()
+    final_losses = AverageMeter()
+    reg_losses = AverageMeter()
+    mse_losses = AverageMeter()
     acc = AverageMeter()
 
     # switch to train mode
     model.train()
 
     end = time.time()
-    for i, (input, target, target_weight, meta) in enumerate(train_loader):
+    for i, (input, target, target_weight, cord, meta) in enumerate(train_loader):
         # measure data loading time
         data_time.update(time.time() - end)
 
         # compute output
-        outputs = model(input)
+        outputs, locs = model(input)
 
         target = target.cuda(non_blocking=True)
         target_weight = target_weight.cuda(non_blocking=True)
 
         if isinstance(outputs, list):
-            loss = criterion(outputs[0], target, target_weight)
-            for output in outputs[1:]:
-                loss += criterion(output, target, target_weight)
+            loc = locs[0]
+            loc_x = loc[:, 0:17, :, :]
+            loc_y = loc[:, 17:, :, :]
+            loc = torch.cat((torch.unsqueeze((loc_x), 0),
+                             torch.unsqueeze((loc_y), 0)))
+            mse_loss = criterion(outputs[0], target, target_weight)
+            mse_reg_loss = regress_loss(loc, cord, target_weight)
+            for output, loc in outputs[1:], locs[1:]:
+                loc_x = loc[:, 0:17, :, :]
+                loc_y = loc[:, 17:, :, :]
+                loc = torch.cat((torch.unsqueeze((loc_x), 0),
+                                 torch.unsqueeze((loc_y), 0)))
+                mse_loss += criterion(output, target, target_weight)
+                reg_loss += regress_loss(loc, cord, target_weight)
         else:
             output = outputs
-            loss = criterion(output, target, target_weight)
+            loc = locs
+            loc_x = loc[:, 0:17, :, :]
+            loc_y = loc[:, 17:, :, :]
+            loc = torch.cat((torch.unsqueeze((loc_x), 0),
+                             torch.unsqueeze((loc_y), 0)))
+            mse_loss = criterion(output, target, target_weight)
+            reg_loss = regress_loss(loc, cord, target_weight)
+        final_loss = mse_loss+0.00001*reg_loss
 
         # loss = criterion(output, target, target_weight)
 
         # compute gradient and do update step
         optimizer.zero_grad()
-        loss.backward()
+        final_loss.backward()
         optimizer.step()
 
         # measure accuracy and record loss
-        losses.update(loss.item(), input.size(0))
+        final_losses.update(final_loss.item(), input.size(0))
+        reg_losses.update(reg_loss.item(), input.size(0))
+        mse_losses.update(mse_loss.item(), input.size(0))
 
         _, avg_acc, cnt, pred = accuracy(output.detach().cpu().numpy(),
                                          target.detach().cpu().numpy())
@@ -73,19 +95,23 @@ def train(config, train_loader, model, criterion, optimizer, epoch,
 
         if i % config.PRINT_FREQ == 0:
             msg = 'Epoch: [{0}][{1}/{2}]\t' \
-                  'Time {batch_time.val:.3f}s ({batch_time.sum:.3f}s)\t' \
+                  'Time {batch_time.val:.3f}s ({batch_time.avg:.3f}s)\t' \
                   'Speed {speed:.1f} samples/s\t' \
                   'Data {data_time.val:.3f}s ({data_time.avg:.3f}s)\t' \
                   'Loss {loss.val:.5f} ({loss.avg:.5f})\t' \
+                  'Reg Loss {Rloss.val:.5f} ({Rloss.avg:.5f})\t' \
+                  'MSE Loss {MSEloss.val:.5f} ({MSEloss.avg:.5f})\t' \
                   'Accuracy {acc.val:.3f} ({acc.avg:.3f})'.format(
                       epoch, i, len(train_loader), batch_time=batch_time,
                       speed=input.size(0)/batch_time.val,
-                      data_time=data_time, loss=losses, acc=acc)
+                      data_time=data_time, loss=final_losses, Rloss=reg_losses, MSEloss=mse_losses, acc=acc)
             logger.info(msg)
 
             writer = writer_dict['writer']
             global_steps = writer_dict['train_global_steps']
-            writer.add_scalar('train_loss', losses.val, global_steps)
+            writer.add_scalar('train_loss', final_losses.val, global_steps)
+            writer.add_scalar('train_reg_loss', reg_losses.val, global_steps)
+            writer.add_scalar('train_mse_loss', mse_losses.val, global_steps)
             writer.add_scalar('train_acc', acc.val, global_steps)
             writer_dict['train_global_steps'] = global_steps + 1
 
@@ -94,10 +120,12 @@ def train(config, train_loader, model, criterion, optimizer, epoch,
                               prefix)
 
 
-def validate(config, val_loader, val_dataset, model, criterion, output_dir,
+def validate(config, val_loader, val_dataset, model, criterion, regress_loss, output_dir,
              tb_log_dir, writer_dict=None):
     batch_time = AverageMeter()
-    losses = AverageMeter()
+    final_losses = AverageMeter()
+    reg_losses = AverageMeter()
+    mse_losses = AverageMeter()
     acc = AverageMeter()
 
     # switch to evaluate mode
@@ -115,22 +143,39 @@ def validate(config, val_loader, val_dataset, model, criterion, output_dir,
     idx = 0
     with torch.no_grad():
         end = time.time()
-        for i, (input, target, target_weight, meta) in enumerate(val_loader):
+        for i, (input, target, target_weight, cord, meta) in enumerate(val_loader):
             # compute output
-            outputs = model(input)
+            outputs, locs = model(input)
+            loc_x = locs[:, 0:17, :, :]
+            loc_y = locs[:, 17:, :, :]
+            locs = torch.cat((torch.unsqueeze((loc_x), 0),
+                              torch.unsqueeze((loc_y), 0)))
+            xlocs = torch.squeeze((locs[0]), 0)
+            ylocs = torch.squeeze((locs[1]), 0)
+
             if isinstance(outputs, list):
                 output = outputs[-1]
+                xloc = xlocs[-1]
+                yloc = ylocs[-1]
             else:
                 output = outputs
+                xloc = xlocs
+                yloc = ylocs
 
             if config.TEST.FLIP_TEST:
                 input_flipped = input.flip(3)
-                outputs_flipped = model(input_flipped)
+                outputs_flipped, locs_flipped = model(input_flipped)
+                xlocs_flipped = torch.squeeze((locs[0]), 0)
+                ylocs_flipped = torch.squeeze((locs[1]), 0)
 
                 if isinstance(outputs_flipped, list):
                     output_flipped = outputs_flipped[-1]
+                    xloc_flipped = xlocs_flipped[-1]
+                    yloc_flipped = xlocs_flipped[-1]
                 else:
                     output_flipped = outputs_flipped
+                    xloc_flipped = xlocs_flipped
+                    yloc_flipped = ylocs_flipped
 
                 output_flipped = flip_back(output_flipped.cpu().numpy(),
                                            val_dataset.flip_pairs)
@@ -142,15 +187,24 @@ def validate(config, val_loader, val_dataset, model, criterion, output_dir,
                         output_flipped.clone()[:, :, :, 0:-1]
 
                 output = (output + output_flipped) * 0.5
+                xloc = (xloc+xloc_flipped)*0.5
+                yloc = (yloc+yloc_flipped)*0.5
 
             target = target.cuda(non_blocking=True)
             target_weight = target_weight.cuda(non_blocking=True)
 
-            loss = criterion(output, target, target_weight)
+            loc = torch.cat((torch.unsqueeze((xloc), 0),
+                             torch.unsqueeze((yloc), 0)))
+
+            mse_loss = criterion(output, target, target_weight)
+            reg_loss = regress_loss(loc, cord, target_weight)
+            final_loss = mse_loss+0.01*reg_loss
 
             num_images = input.size(0)
             # measure accuracy and record loss
-            losses.update(loss.item(), num_images)
+            final_losses.update(final_loss.item(), input.size(0))
+            reg_losses.update(reg_loss.item(), input.size(0))
+            mse_losses.update(mse_loss.item(), input.size(0))
             _, avg_acc, cnt, pred = accuracy(output.cpu().numpy(),
                                              target.cpu().numpy())
 
@@ -165,7 +219,9 @@ def validate(config, val_loader, val_dataset, model, criterion, output_dir,
             score = meta['score'].numpy()
 
             preds, maxvals = get_final_preds(
-                config, output.clone().cpu().numpy(), c, s)
+                config, output.clone().cpu().numpy(),
+                xloc.clone().cpu().numpy(),
+                yloc.clone().cpu().numpy(), c, s)
 
             all_preds[idx:idx + num_images, :, 0:2] = preds[:, :, 0:2]
             all_preds[idx:idx + num_images, :, 2:3] = maxvals
@@ -182,9 +238,11 @@ def validate(config, val_loader, val_dataset, model, criterion, output_dir,
                 msg = 'Test: [{0}/{1}]\t' \
                       'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t' \
                       'Loss {loss.val:.4f} ({loss.avg:.4f})\t' \
+                      'MSE Loss {mse_loss.val:.4f} ({mse_loss.avg:.4f})\t' \
+                      'Reg Loss {reg_loss.val:.4f} ({reg_loss.avg:.4f})\t' \
                       'Accuracy {acc.val:.3f} ({acc.avg:.3f})'.format(
                           i, len(val_loader), batch_time=batch_time,
-                          loss=losses, acc=acc)
+                          loss=final_losses, mse_loss=mse_losses, reg_loss=reg_losses, acc=acc)
                 logger.info(msg)
 
                 prefix = '{}_{}'.format(
@@ -209,8 +267,18 @@ def validate(config, val_loader, val_dataset, model, criterion, output_dir,
             writer = writer_dict['writer']
             global_steps = writer_dict['valid_global_steps']
             writer.add_scalar(
-                'valid_loss',
-                losses.avg,
+                'valid_final_loss',
+                final_losses.avg,
+                global_steps
+            )
+            writer.add_scalar(
+                'valid_mse_loss',
+                mse_losses.avg,
+                global_steps
+            )
+            writer.add_scalar(
+                'valid_reg_loss',
+                reg_losses.avg,
                 global_steps
             )
             writer.add_scalar(
@@ -236,7 +304,6 @@ def validate(config, val_loader, val_dataset, model, criterion, output_dir,
     return perf_indicator
 
 
-# markdown format output
 def _print_name_value(name_value, full_arch_name):
     names = name_value.keys()
     values = name_value.values()

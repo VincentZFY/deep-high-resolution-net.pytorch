@@ -14,7 +14,6 @@ import logging
 import torch
 import torch.nn as nn
 
-
 BN_MOMENTUM = 0.1
 logger = logging.getLogger(__name__)
 
@@ -271,6 +270,57 @@ blocks_dict = {
 }
 
 
+class PoseHead(nn.Module):
+    def __init__(self, cfg, num_channels):
+        super(PoseHead, self).__init__()
+
+        loc_tower = []
+        for i in range(4):  # TODO: Define this hyper-para in cfg files
+            loc_tower.append(
+                nn.Conv2d(
+                    num_channels,
+                    num_channels,
+                    kernel_size=3,
+                    stride=1,
+                    padding=1
+                )
+            )
+            loc_tower.append(nn.GroupNorm(32, num_channels))
+            loc_tower.append(nn.ReLU())
+        self.add_module('loc_tower', nn.Sequential(*loc_tower))
+        self.h_pred = nn.Conv2d(
+            num_channels,
+            cfg['MODEL']['NUM_JOINTS'],
+            kernel_size=cfg['MODEL']['EXTRA']['FINAL_CONV_KERNEL'],
+            stride=1,
+            padding=1 if cfg['MODEL']['EXTRA']['FINAL_CONV_KERNEL'] == 3 else 0
+        )
+        self.w_pred = nn.Conv2d(
+            num_channels,
+            cfg['MODEL']['NUM_JOINTS'],
+            kernel_size=cfg['MODEL']['EXTRA']['FINAL_CONV_KERNEL'],
+            stride=1,
+            padding=1 if cfg['MODEL']['EXTRA']['FINAL_CONV_KERNEL'] == 3 else 0
+        )
+
+        for modules in [self.loc_tower, self.h_pred]:
+            for l in modules.modules():
+                if isinstance(l, nn.Conv2d):
+                    torch.nn.init.normal_(l.weight, std=0.01)
+                    torch.nn.init.constant_(l.bias, 0)
+        for modules in [self.loc_tower, self.w_pred]:
+            for l in modules.modules():
+                if isinstance(l, nn.Conv2d):
+                    torch.nn.init.normal_(l.weight, std=0.01)
+                    torch.nn.init.constant_(l.bias, 0)
+
+    def forward(self, x):
+        h_reg = torch.exp(self.h_pred(self.loc_tower(x)))
+        w_reg = torch.exp(self.w_pred(self.loc_tower(x)))
+        loc = torch.cat((h_reg, w_reg), 1)
+        return loc
+
+
 class PoseHighResolutionNet(nn.Module):
 
     def __init__(self, cfg, **kwargs):
@@ -327,7 +377,7 @@ class PoseHighResolutionNet(nn.Module):
             stride=1,
             padding=1 if extra['FINAL_CONV_KERNEL'] == 3 else 0
         )
-
+        self.reg_layer = PoseHead(cfg, pre_stage_channels[0])
         self.pretrained_layers = extra['PRETRAINED_LAYERS']
 
     def _make_transition_layer(
@@ -456,8 +506,8 @@ class PoseHighResolutionNet(nn.Module):
         y_list = self.stage4(x_list)
 
         x = self.final_layer(y_list[0])
-
-        return x
+        loc = self.reg_layer(y_list[0])
+        return x, loc
 
     def init_weights(self, pretrained=''):
         logger.info('=> init weights from normal distribution')
@@ -479,6 +529,9 @@ class PoseHighResolutionNet(nn.Module):
 
         if os.path.isfile(pretrained):
             pretrained_state_dict = torch.load(pretrained)
+            model_dict = self.state_dict()
+            pretrained_state_dict = {
+                k: v for k, v in pretrained_state_dict.items() if k in model_dict}
             logger.info('=> loading pretrained model {}'.format(pretrained))
 
             need_init_state_dict = {}

@@ -46,7 +46,7 @@ def get_max_preds(batch_heatmaps):
     return preds, maxvals
 
 
-def get_final_preds(config, batch_heatmaps, center, scale):
+def get_final_preds(config, batch_heatmaps, reg_x, reg_y, center, scale):
     coords, maxvals = get_max_preds(batch_heatmaps)
 
     heatmap_height = batch_heatmaps.shape[2]
@@ -57,6 +57,12 @@ def get_final_preds(config, batch_heatmaps, center, scale):
         for n in range(coords.shape[0]):
             for p in range(coords.shape[1]):
                 hm = batch_heatmaps[n][p]
+                shift_x = reg_x[n][p][int(
+                    coords[n][p][1])][int(coords[n][p][0])]
+                shift_y = reg_y[n][p][int(
+                    coords[n][p][1])][int(coords[n][p][0])]
+                coords[n][p][0] = coords[n][p][0]+shift_x
+                coords[n][p][1] = coords[n][p][1]+shift_y
                 px = int(math.floor(coords[n][p][0] + 0.5))
                 py = int(math.floor(coords[n][p][1] + 0.5))
                 if 1 < px < heatmap_width-1 and 1 < py < heatmap_height-1:

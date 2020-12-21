@@ -144,7 +144,7 @@ class JointsDataset(Dataset):
 
         if self.is_train:
             if (np.sum(joints_vis[:, 0]) > self.num_joints_half_body
-                and np.random.rand() < self.prob_half_body):
+                    and np.random.rand() < self.prob_half_body):
                 c_half_body, s_half_body = self.half_body_transform(
                     joints, joints_vis
                 )
@@ -178,10 +178,11 @@ class JointsDataset(Dataset):
             if joints_vis[i, 0] > 0.0:
                 joints[i, 0:2] = affine_transform(joints[i, 0:2], trans)
 
-        target, target_weight = self.generate_target(joints, joints_vis)
+        target, target_weight, cord = self.generate_target(joints, joints_vis)
 
         target = torch.from_numpy(target)
         target_weight = torch.from_numpy(target_weight)
+        cord = torch.from_numpy(cord)
 
         meta = {
             'image': image_file,
@@ -195,7 +196,7 @@ class JointsDataset(Dataset):
             'score': score
         }
 
-        return input, target, target_weight, meta
+        return input, target, target_weight, cord, meta
 
     def select_data(self, db):
         db_selected = []
@@ -247,6 +248,7 @@ class JointsDataset(Dataset):
                                self.heatmap_size[1],
                                self.heatmap_size[0]),
                               dtype=np.float32)
+            cord = np.zeros((2, self.num_joints), dtype=np.int32)
 
             tmp_size = self.sigma * 3
 
@@ -269,7 +271,8 @@ class JointsDataset(Dataset):
                 y = x[:, np.newaxis]
                 x0 = y0 = size // 2
                 # The gaussian is not normalized, we want the center value to equal 1
-                g = np.exp(- ((x - x0) ** 2 + (y - y0) ** 2) / (2 * self.sigma ** 2))
+                g = np.exp(- ((x - x0) ** 2 + (y - y0) ** 2) /
+                           (2 * self.sigma ** 2))
 
                 # Usable gaussian range
                 g_x = max(0, -ul[0]), min(br[0], self.heatmap_size[0]) - ul[0]
@@ -282,8 +285,10 @@ class JointsDataset(Dataset):
                 if v > 0.5:
                     target[joint_id][img_y[0]:img_y[1], img_x[0]:img_x[1]] = \
                         g[g_y[0]:g_y[1], g_x[0]:g_x[1]]
+                    cord[0][joint_id] = mu_x
+                    cord[1][joint_id] = mu_y
 
         if self.use_different_joints_weight:
             target_weight = np.multiply(target_weight, self.joints_weight)
 
-        return target, target_weight
+        return target, target_weight, cord

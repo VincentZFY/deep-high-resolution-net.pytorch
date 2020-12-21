@@ -21,11 +21,12 @@ import torch.utils.data
 import torch.utils.data.distributed
 import torchvision.transforms as transforms
 from tensorboardX import SummaryWriter
+#from torch.utils.tensorboard import SummaryWriter
 
 import _init_paths
 from config import cfg
 from config import update_config
-from core.loss import JointsMSELoss
+from core.loss import JointsMSELoss, RegLoss
 from core.function import train
 from core.function import validate
 from utils.utils import get_optimizer
@@ -36,7 +37,6 @@ from utils.utils import get_model_summary
 import dataset
 import models
 
-os.environ["CUDA_VISIBLE_DEVICES"]='5,6'
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train keypoints network')
@@ -86,15 +86,16 @@ def main():
 
     # cudnn related setting
     cudnn.benchmark = cfg.CUDNN.BENCHMARK
+    # 用于加快训练速度，同时避免benchmark的随机性
     torch.backends.cudnn.deterministic = cfg.CUDNN.DETERMINISTIC
     torch.backends.cudnn.enabled = cfg.CUDNN.ENABLED
 
     model = eval('models.'+cfg.MODEL.NAME+'.get_pose_net')(
         cfg, is_train=True
-    )
+    )  # eval()函数执行一个字符串表达式，并返回表达式的值
 
     # copy model file
-    this_dir = os.path.dirname(__file__)
+    this_dir = os.path.dirname(__file__)  # 取当前路径
     shutil.copy2(
         os.path.join(this_dir, '../lib/models', cfg.MODEL.NAME + '.py'),
         final_output_dir)
@@ -111,17 +112,21 @@ def main():
     )
     writer_dict['writer'].add_graph(model, (dump_input, ))
 
-    logger.info(get_model_summary(model, dump_input))
+    logger.info(get_model_summary(model, dump_input))  # 记录模型日志
 
-    model = torch.nn.DataParallel(model).cuda()
-
+    model = torch.nn.DataParallel(model, device_ids=cfg.GPUS).cuda()
+    #model = torch.nn.DataParallel(model, device_ids=[0]).cuda()
+    # 多GPU训练
     # define loss function (criterion) and optimizer
     criterion = JointsMSELoss(
         use_target_weight=cfg.LOSS.USE_TARGET_WEIGHT
     ).cuda()
-
+    regress_loss = RegLoss(
+        use_target_weight=cfg.LOSS.USE_TARGET_WEIGHT
+    ).cuda()
     # Data loading code
     normalize = transforms.Normalize(
+        # 使用Imagenet的均值和标准差进行归一化
         mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
     )
     train_dataset = eval('dataset.'+cfg.DATASET.DATASET)(
@@ -137,21 +142,21 @@ def main():
             transforms.ToTensor(),
             normalize,
         ])
-    )
+    )  # 图像处理
 
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
         batch_size=cfg.TRAIN.BATCH_SIZE_PER_GPU*len(cfg.GPUS),
         shuffle=cfg.TRAIN.SHUFFLE,
         num_workers=cfg.WORKERS,
-        pin_memory=cfg.PIN_MEMORY
+        pin_memory=cfg.PIN_MEMORY,
     )
     valid_loader = torch.utils.data.DataLoader(
         valid_dataset,
         batch_size=cfg.TEST.BATCH_SIZE_PER_GPU*len(cfg.GPUS),
         shuffle=False,
         num_workers=cfg.WORKERS,
-        pin_memory=cfg.PIN_MEMORY
+        pin_memory=cfg.PIN_MEMORY,
     )
 
     best_perf = 0.0
@@ -184,13 +189,12 @@ def main():
         lr_scheduler.step()
 
         # train for one epoch
-        train(cfg, train_loader, model, criterion, optimizer, epoch,
+        train(cfg, train_loader, model, criterion, regress_loss, optimizer, epoch,
               final_output_dir, tb_log_dir, writer_dict)
-
 
         # evaluate on validation set
         perf_indicator = validate(
-            cfg, valid_loader, valid_dataset, model, criterion,
+            cfg, valid_loader, valid_dataset, model, criterion, regress_loss,
             final_output_dir, tb_log_dir, writer_dict
         )
 
