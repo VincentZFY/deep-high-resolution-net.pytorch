@@ -51,7 +51,7 @@ def parse_args():
                         default=None,
                         nargs=argparse.REMAINDER)
 
-    # philly
+    
     parser.add_argument('--modelDir',
                         help='model directory',
                         type=str,

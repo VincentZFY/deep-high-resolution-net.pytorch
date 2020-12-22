@@ -71,7 +71,7 @@ def train(config, train_loader, model, criterion, regress_loss, optimizer, epoch
                              torch.unsqueeze((loc_y), 0)))
             mse_loss = criterion(output, target, target_weight)
             reg_loss = regress_loss(loc, cord, target_weight)
-        final_loss = mse_loss+0.00001*reg_loss
+        final_loss = mse_loss+config.FCOS_WEIGHT*reg_loss
 
         # loss = criterion(output, target, target_weight)
 
